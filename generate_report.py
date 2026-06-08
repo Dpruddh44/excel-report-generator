@@ -50,6 +50,7 @@ def main():
     employee_cols = ["Employee ID", "Employee Name", "Employee Email", "L4", "DOJ", "Location", "Designation", "Category"]
     employee_section = eaid_dmm[employee_cols].copy()
     employee_section = employee_section.rename(columns={"Location": "Office Location"})
+    employee_section["L4"] = "DMM"
 
     print("STEP 7: PROCESS RBR DATA")
     rbr_cn = rbr_eng.iloc[:, :92].copy()
