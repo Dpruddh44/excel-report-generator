@@ -1,156 +1,266 @@
-import pandas as pd
+"""
+DMM Ops Report Generator
+========================
+Automates the 5-step procedure for preparing the DMM Ops Report.
+
+Input files (expected in the same directory):
+  1. EAID AT 7 May for Ops team.xlsx
+  2. DMM Ops Report_1-29 April (as on 30 April).xlsx
+  3. MTD Revenue_by_Resource_11-05-2026.xlsx
+
+Output:
+  DMM Ops Report_UPDATED.xlsx
+"""
+
+import openpyxl
+from openpyxl.utils import get_column_letter
+from copy import copy
+import os
 import sys
-from pathlib import Path
+from datetime import datetime
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+
+EAID_FILE = os.path.join(SCRIPT_DIR, "EAID AT 7 May for Ops team.xlsx")
+DMM_OPS_FILE = os.path.join(SCRIPT_DIR, "DMM Ops Report_1-29 April (as on 30 April).xlsx")
+RBR_FILE = os.path.join(SCRIPT_DIR, "MTD Revenue_by_Resource_11-05-2026.xlsx")
+OUTPUT_FILE = os.path.join(SCRIPT_DIR, "DMM Ops Report_UPDATED.xlsx")
+
+# EAID column indices (0-based, headers on row 3, data from row 4)
+EAID_HEADER_ROW = 3
+EAID_DATA_START_ROW = 4
+EAID_COL_EMP_ID = 0       # A: Emp ID
+EAID_COL_EMP_NAME = 1     # B: Emp Name
+EAID_COL_EMP_EMAIL = 2    # C: Emp Email
+EAID_COL_DOJ = 3          # D: DOJ
+EAID_COL_LOCATION = 4     # E: Location
+EAID_COL_L4 = 8           # I: L4
+EAID_COL_DESIGNATION = 10 # K: Designation
+EAID_COL_CATEGORY = 16    # Q: Category
+
+DMM_L4_VALUE = "DATA MODERNIZATION & MIGRATION"
+
+# ADMM column indices (0-based)
+ADMM_COL_EMP_ID = 0
+ADMM_COL_EMP_NAME = 1
+ADMM_COL_EMAIL = 2
+ADMM_COL_L4 = 3
+ADMM_COL_RM_NAME = 4
+ADMM_COL_DOJ = 5
+ADMM_COL_OFFICE_LOC = 6
+ADMM_COL_DESIGNATION = 7
+ADMM_COL_CATEGORY = 8
+
+# RBR column index for Employee sub-function
+RBR_COL_EMP_SUBFUNCTION = 34  # AI: Employee sub-function
+RBR_FILTER_VALUE = "ENG"
+
+# CN = Excel column letter CN = the 92nd column (0-based index 91)
+# In RBR this is "FIG Code Description"; in Data tab it's also column 91
+CN_COL_INDEX = 91
+# We copy columns 0..91 (inclusive) = 92 columns
 
 
-EAID_FILE    = "EAID AT 7 May for Ops team.xlsx"
-DMM_OPS_FILE = "DMM Ops Report_1-29 April (as on 30 April).xlsx"
-MTD_FILE     = "MTD Revenue_by_Resource_11-05-2026.xlsx"
-OUTPUT_FILE  = "final_report.xlsx"
+def read_eaid_dmm_rows():
+    """Step 1: Read EAID and filter for DMM (L4 = DATA MODERNIZATION & MIGRATION)."""
+    print("[Step 1] Reading EAID file and filtering for DMM...")
+    wb = openpyxl.load_workbook(EAID_FILE, read_only=True, data_only=True)
+    ws = wb["Base Data"]
 
-SUMMARY_SHEETS = [
-    "1.1 Partner Summary",
-    "1.2Partner Detailed Information",
-    "1.3 RPH < 1000",
-    "1.4 Discount>65%",
-]
+    dmm_rows = []
+    total = 0
+    for row in ws.iter_rows(min_row=EAID_DATA_START_ROW, values_only=True):
+        if row[EAID_COL_EMP_ID] is None:
+            continue
+        total += 1
+        l4_val = str(row[EAID_COL_L4]).upper().strip() if row[EAID_COL_L4] else ""
+        if l4_val == DMM_L4_VALUE:
+            dmm_rows.append(row)
 
-# Columns 93–94 in the original Data tab (beyond col CN=92) that must be preserved
-KEPT_DATA_COLS = ["Practitioner L4", "Engg Participating Partner Function"]
+    wb.close()
+    print(f"  Total EAID rows scanned: {total}")
+    print(f"  DMM rows found: {len(dmm_rows)}")
+    return dmm_rows
+
+
+def read_rbr_eng_rows():
+    """Step 5a: Read RBR and filter for ENG in Employee sub-function."""
+    print("[Step 5a] Reading RBR file and filtering for ENG...")
+    wb = openpyxl.load_workbook(RBR_FILE, read_only=True, data_only=True)
+    ws = wb["Export"]
+
+    # Read headers (row 1) — columns A through CN (indices 0..91)
+    headers = []
+    for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+        headers = list(row[: CN_COL_INDEX + 1])
+
+    eng_rows = []
+    total = 0
+    for row in ws.iter_rows(min_row=2, values_only=True):
+        if row[0] is None:
+            continue
+        total += 1
+        subfunction = str(row[RBR_COL_EMP_SUBFUNCTION]).upper().strip() if row[RBR_COL_EMP_SUBFUNCTION] else ""
+        if subfunction == RBR_FILTER_VALUE:
+            # Take only columns A through CN
+            eng_rows.append(list(row[: CN_COL_INDEX + 1]))
+
+    wb.close()
+    print(f"  Total RBR rows scanned: {total}")
+    print(f"  ENG rows found: {len(eng_rows)}")
+    return headers, eng_rows
+
+
+def rebuild_admm(ws_admm, dmm_rows):
+    """Step 2 & 3: Clear ADMM and repopulate from EAID DMM rows."""
+    print("[Step 3] Rebuilding ADMM sheet...")
+
+    # Preserve header row (row 1)
+    # Clear all data rows (row 2 onwards)
+    max_row = ws_admm.max_row
+    if max_row > 1:
+        for row_idx in range(2, max_row + 1):
+            for col_idx in range(1, 10):  # 9 columns
+                ws_admm.cell(row=row_idx, column=col_idx).value = None
+
+    # Write DMM rows
+    for i, eaid_row in enumerate(dmm_rows):
+        out_row = i + 2  # row 2 onwards
+
+        ws_admm.cell(row=out_row, column=ADMM_COL_EMP_ID + 1).value = eaid_row[EAID_COL_EMP_ID]
+        ws_admm.cell(row=out_row, column=ADMM_COL_EMP_NAME + 1).value = eaid_row[EAID_COL_EMP_NAME]
+        ws_admm.cell(row=out_row, column=ADMM_COL_EMAIL + 1).value = eaid_row[EAID_COL_EMP_EMAIL]
+        ws_admm.cell(row=out_row, column=ADMM_COL_L4 + 1).value = "DMM"
+        ws_admm.cell(row=out_row, column=ADMM_COL_RM_NAME + 1).value = None  # RM Name left blank
+        ws_admm.cell(row=out_row, column=ADMM_COL_DOJ + 1).value = eaid_row[EAID_COL_DOJ]
+        ws_admm.cell(row=out_row, column=ADMM_COL_OFFICE_LOC + 1).value = eaid_row[EAID_COL_LOCATION]
+        ws_admm.cell(row=out_row, column=ADMM_COL_DESIGNATION + 1).value = eaid_row[EAID_COL_DESIGNATION]
+        ws_admm.cell(row=out_row, column=ADMM_COL_CATEGORY + 1).value = eaid_row[EAID_COL_CATEGORY]
+
+    print(f"  Wrote {len(dmm_rows)} rows to ADMM sheet")
+
+
+def clean_and_paste_data_tab(ws_data, rbr_headers, rbr_eng_rows):
+    """Step 4 & 5: Clean Data tab (keep last 2 cols), paste RBR ENG data."""
+    print("[Step 4] Cleaning Data tab...")
+
+    # The Data tab has 94 columns (indices 0-93)
+    # Last 2 columns: Practitioner L4 (col 93, CO) and Engg Participating Partner Function (col 94, CP)
+    # "Delete columns till Client Name" = delete columns A through BD (indices 0-55)
+    # But actually we need to restructure: final layout = RBR columns (A-BD) + last 2 original columns
+
+    # Read the last 2 columns' headers
+    last_col_1_header = ws_data.cell(row=1, column=93).value  # Practitioner L4
+    last_col_2_header = ws_data.cell(row=1, column=94).value  # Engg Participating Partner Function
+    print(f"  Keeping last 2 columns: '{last_col_1_header}', '{last_col_2_header}'")
+
+    # Read existing last-2-column data to preserve if needed (for reference)
+    # Per the plan, we leave them blank for new rows
+
+    # Now clear the entire sheet
+    max_row = ws_data.max_row
+    max_col = ws_data.max_column
+    print(f"  Original Data tab: {max_row} rows x {max_col} columns")
+
+    for row_idx in range(1, max_row + 1):
+        for col_idx in range(1, max_col + 1):
+            ws_data.cell(row=row_idx, column=col_idx).value = None
+
+    # Write RBR headers (columns A through Client Name = 56 columns)
+    num_rbr_cols = len(rbr_headers)
+    for j, header in enumerate(rbr_headers):
+        ws_data.cell(row=1, column=j + 1).value = header
+
+    # Write the last 2 column headers after RBR columns
+    ws_data.cell(row=1, column=num_rbr_cols + 1).value = last_col_1_header
+    ws_data.cell(row=1, column=num_rbr_cols + 2).value = last_col_2_header
+
+    print(f"[Step 5] Pasting {len(rbr_eng_rows)} ENG rows into Data tab...")
+
+    # Write RBR ENG data rows
+    for i, rbr_row in enumerate(rbr_eng_rows):
+        out_row = i + 2  # row 2 onwards
+        for j, val in enumerate(rbr_row):
+            ws_data.cell(row=out_row, column=j + 1).value = val
+        # Last 2 columns left blank for new rows
+
+    final_cols = num_rbr_cols + 2
+    final_rows = len(rbr_eng_rows) + 1  # +1 for header
+    print(f"  Final Data tab: {final_rows} rows x {final_cols} columns")
 
 
 def main():
+    print("=" * 60)
+    print("DMM Ops Report Generator")
+    print("=" * 60)
+    print()
 
-    # ──────────────────────────────────────────────
-    print("STEP 1: LOAD FILES")
-    # ──────────────────────────────────────────────
+    # Verify all input files exist
+    for f in [EAID_FILE, DMM_OPS_FILE, RBR_FILE]:
+        if not os.path.exists(f):
+            print(f"ERROR: File not found: {f}")
+            sys.exit(1)
+    print("All input files found.\n")
 
-    try:
-        # EAID: real headers are on row 3 (0-indexed: header=2)
-        eaid_df = pd.read_excel(EAID_FILE, sheet_name=0, header=2, dtype=str)
-        eaid_df.columns = [str(c).strip() for c in eaid_df.columns]
+    # Step 1: Read EAID and filter for DMM
+    dmm_rows = read_eaid_dmm_rows()
+    print()
 
-        # DMM Ops template: read the Data tab only to capture its last 2 columns (beyond CN)
-        dmm_data_df = pd.read_excel(DMM_OPS_FILE, sheet_name="Data", dtype=str)
-        dmm_data_df.columns = [str(c).strip() for c in dmm_data_df.columns]
+    # Step 5a: Read RBR and filter for ENG (do this before opening DMM for writing)
+    rbr_headers, rbr_eng_rows = read_rbr_eng_rows()
+    print()
 
-        # MTD Revenue by Resource
-        rbr_df = pd.read_excel(MTD_FILE, sheet_name=0, dtype=str)
-        rbr_df.columns = [str(c).strip() for c in rbr_df.columns]
+    # Open DMM Ops Report for editing
+    print("[Step 2] Opening DMM Ops Report for editing...")
+    wb_dmm = openpyxl.load_workbook(DMM_OPS_FILE)
+    print(f"  Sheets: {wb_dmm.sheetnames}")
+    print()
 
-        # Summary sheets (preserved as-is in the output)
-        summary_sheets = {}
-        for sheet in SUMMARY_SHEETS:
-            try:
-                summary_sheets[sheet] = pd.read_excel(
-                    DMM_OPS_FILE, sheet_name=sheet, header=None
-                )
-            except Exception as e:
-                print(f"  ⚠  Could not read summary sheet '{sheet}': {e}")
+    # Step 3: Rebuild ADMM sheet
+    ws_admm = wb_dmm["ADMM"]
+    rebuild_admm(ws_admm, dmm_rows)
+    print()
 
-    except FileNotFoundError as e:
-        print(f"Error loading files: {e}")
-        sys.exit(1)
+    # Step 4 & 5: Clean Data tab and paste RBR data
+    ws_data = wb_dmm["Data"]
+    clean_and_paste_data_tab(ws_data, rbr_headers, rbr_eng_rows)
+    print()
 
-    # ──────────────────────────────────────────────
-    print("STEP 2: FILTER EAID FOR DMM")
-    # ──────────────────────────────────────────────
+    # Save output
+    print(f"Saving to: {OUTPUT_FILE}")
+    wb_dmm.save(OUTPUT_FILE)
+    wb_dmm.close()
+    print("Done!")
 
-    eaid_dmm = eaid_df[
-        eaid_df["L4"].str.upper().str.strip() == "DATA MODERNIZATION & MIGRATION"
-    ].copy()
-    print(f"  → {len(eaid_dmm)} DMM resources found in EAID.")
+    # Verification summary
+    print()
+    print("=" * 60)
+    print("VERIFICATION SUMMARY")
+    print("=" * 60)
+    print(f"  ADMM rows written:     {len(dmm_rows)}")
+    print(f"  Data tab rows written: {len(rbr_eng_rows)}")
+    print(f"  Data tab columns:      {len(rbr_headers) + 2}")
+    print(f"  Output file:           {OUTPUT_FILE}")
+    print(f"  Output file size:      {os.path.getsize(OUTPUT_FILE) / (1024*1024):.1f} MB")
 
-    # ──────────────────────────────────────────────
-    print("STEP 3: FILTER RBR FOR ENG")
-    # ──────────────────────────────────────────────
+    # Spot-check
+    print()
+    print("Spot-check (first 3 ADMM rows):")
+    wb_check = openpyxl.load_workbook(OUTPUT_FILE, read_only=True, data_only=True)
+    ws_check = wb_check["ADMM"]
+    for row in ws_check.iter_rows(min_row=1, max_row=4, values_only=True):
+        print(f"  {list(row)}")
 
-    # Exact column name in MTD file is "Employee sub-function"
-    rbr_eng = rbr_df[
-        rbr_df["Employee sub-function"].str.upper().str.strip() == "ENG"
-    ].copy()
-    print(f"  → {len(rbr_eng)} ENG rows found in MTD (of {len(rbr_df)} total).")
+    print()
+    print("Spot-check (Data tab header + first 2 rows):")
+    ws_data_check = wb_check["Data"]
+    for row in ws_data_check.iter_rows(min_row=1, max_row=3, values_only=True):
+        vals = [v for v in row if v is not None]
+        print(f"  {vals[:10]}...")
 
-    # ──────────────────────────────────────────────
-    print("STEP 4: BUILD ADMM TAB DATA")
-    # ──────────────────────────────────────────────
-
-    # Required EAID source columns
-    required_eaid = ["Emp ID", "Emp Name", "Emp Email", "L4", "DOJ",
-                     "Location", "Designation", "Category"]
-    missing = [c for c in required_eaid if c not in eaid_dmm.columns]
-    if missing:
-        print(f"ERROR: EAID file is missing columns: {missing}")
-        sys.exit(1)
-
-    admm_df = eaid_dmm[required_eaid].rename(columns={
-        "Emp ID":      "Employee ID",
-        "Emp Name":    "Employee Name",
-        "Emp Email":   "Email ID",          # ADMM header is "Email ID", not "Employee Email"
-        "L4":          "L4",
-        "DOJ":         "Date of Joining",   # ADMM header is "Date of Joining", not "DOJ"
-        "Location":    "Office Location",
-        "Designation": "Designation",
-        "Category":    "Category",
-    }).copy()
-
-    # L4 is always "DMM" in the ADMM tab
-    admm_df["L4"] = "DMM"
-
-    # Insert blank RM Name column at position 4 (after Email ID, before Date of Joining)
-    admm_df.insert(4, "RM Name", "")
-
-    admm_df = admm_df[[
-        "Employee ID", "Employee Name", "Email ID", "L4", "RM Name",
-        "Date of Joining", "Office Location", "Designation", "Category",
-    ]].reset_index(drop=True)
-
-    # ──────────────────────────────────────────────
-    print("STEP 5: TAKE RBR COLS A:CN (first 92 columns)")
-    # ──────────────────────────────────────────────
-
-    # CN is the 92nd column (1-based), so iloc[:, :92] in pandas
-    rbr_cn = rbr_eng.iloc[:, :92].copy().reset_index(drop=True)
-
-    # ──────────────────────────────────────────────
-    print("STEP 6: KEEP LAST TWO TEMPLATE COLUMNS (beyond CN)")
-    # ──────────────────────────────────────────────
-
-    # The original Data tab has 94 cols; cols 93–94 are "Practitioner L4"
-    # and "Engg Participating Partner Function". We preserve them as blank
-    # columns appended to the MTD data (they contain no per-row data to carry over).
-    for col in KEPT_DATA_COLS:
-        rbr_cn[col] = ""
-
-    # ──────────────────────────────────────────────
-    print("STEP 7: VALIDATIONS")
-    # ──────────────────────────────────────────────
-
-    print(f"  DMM Employees (ADMM tab) : {len(admm_df)} rows, {len(admm_df.columns)} columns")
-    print(f"  ENG Rows (Data tab)      : {len(rbr_cn)} rows, {len(rbr_cn.columns)} columns")
-
-    # ──────────────────────────────────────────────
-    print("STEP 8: EXPORT")
-    # ──────────────────────────────────────────────
-
-    with pd.ExcelWriter(OUTPUT_FILE, engine="openpyxl") as writer:
-        # Preserve the 4 summary/dashboard sheets from the original template
-        for sheet_name, df in summary_sheets.items():
-            df.to_excel(writer, sheet_name=sheet_name, index=False, header=False)
-
-        # ADMM tab: DMM resource list from EAID
-        admm_df.to_excel(writer, sheet_name="ADMM", index=False)
-
-        # Data tab: MTD ENG revenue rows (cols A–CN) + 2 appended structural cols
-        rbr_cn.to_excel(writer, sheet_name="Data", index=False)
-
-    # ──────────────────────────────────────────────
-    print("STEP 9: SUCCESS")
-    # ──────────────────────────────────────────────
-
-    print(f"  Report generated : {OUTPUT_FILE}")
-    print(f"  ADMM tab         : {admm_df.shape[0]} rows × {admm_df.shape[1]} columns")
-    print(f"  Data tab         : {rbr_cn.shape[0]} rows × {rbr_cn.shape[1]} columns")
+    wb_check.close()
+    print()
+    print("Report generation complete!")
 
 
 if __name__ == "__main__":
